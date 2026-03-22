@@ -1,0 +1,16 @@
+{
+    "name": "mauricioperera/php-vector-store",
+    "description": "Zero-dependency PHP vector database with Matryoshka search and IVF indexing",
+    "type": "library",
+    "license": "GPL-2.0-or-later",
+    "keywords": ["vector", "embedding", "search", "matryoshka", "ivf", "cosine-similarity", "ai"],
+    "require": {
+        "php": ">=8.1"
+    },
+    "autoload": {
+        "psr-4": {
+            "PHPVectorStore\\": "src/"
+        }
+    },
+    "minimum-stability": "stable"
+}

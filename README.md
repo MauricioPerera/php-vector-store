@@ -1,193 +1,188 @@
 # PHP Vector Store
 
-Zero-dependency PHP vector database with Matryoshka search. Stores embeddings as raw Float32 binary files — no SQLite, no C extensions, no FFI.
+Zero-dependency PHP vector database with Matryoshka search and IVF indexing. Stores embeddings as raw Float32 binary files — no SQLite, no C extensions, no FFI.
 
-A lightweight alternative to `sqlite-vec` for datasets under 50K vectors.
+```
+composer require mauricioperera/php-vector-store
+```
 
-## When to use this vs sqlite-vec
+## When to use this
 
 | | PHP Vector Store | sqlite-vec |
 |---|---|---|
-| Dependencies | **None** (pure PHP) | C extension or FFI |
-| Best for | <50K vectors | >50K vectors |
-| Search | Brute-force + Matryoshka | ANN (IVF/HNSW) |
+| Dependencies | **None** (pure PHP 8.1+) | C extension or FFI |
+| Search <5K vectors | Matryoshka brute-force | Overkill |
+| Search 5K-100K vectors | **IVF + Matryoshka** | ANN (IVF/HNSW) |
+| Search >100K vectors | Not recommended | Use this instead |
 | Size per 768d vector | 3,072 bytes | ~3,100 bytes |
-| Matryoshka support | Native | Manual |
-| WordPress integration | Drop-in | Requires extension install |
-| PHP requirement | 8.1+ | 8.1+ with FFI/extension |
-
-**Use PHP Vector Store when:**
-- You need vector search without installing C extensions
-- Your dataset is under 50K vectors
-- You want zero-config deployment (shared hosting, WordPress, etc.)
-- You use Matryoshka embeddings (EmbeddingGemma, etc.)
-
-**Use sqlite-vec when:**
-- You have >50K vectors and need ANN indexing
-- You can install C extensions on your server
-- You need SQL-based querying alongside vectors
-
-## Installation
-
-Copy `src/VectorStore.php` to your project. No Composer needed.
-
-```php
-require_once 'path/to/VectorStore.php';
-
-use PHPVectorStore\VectorStore;
-$store = new VectorStore( '/path/to/storage', 768 );
-```
+| Deployment | Drop-in anywhere | Requires extension install |
 
 ## Quick Start
 
 ```php
 use PHPVectorStore\VectorStore;
+use PHPVectorStore\IVFIndex;
 
-$store = new VectorStore( __DIR__ . '/vectors' );
+$store = new VectorStore( __DIR__ . '/vectors', 768 );
 
 // Store vectors
-$store->set( 'articles', 'article-1', $embedding, ['title' => 'My Article'] );
-$store->set( 'articles', 'article-2', $embedding2, ['title' => 'Another'] );
-
-// Search (cosine similarity)
-$results = $store->search( 'articles', $queryVector, 5 );
-// [['id' => 'article-1', 'score' => 0.95, 'metadata' => ['title' => 'My Article']]]
-
-// Matryoshka search (6x faster)
-$results = $store->matryoshkaSearch( 'articles', $queryVector, 5, 128 );
-// Coarse pass at 128d, fine re-rank at 768d
-
-// Persist to disk
+$store->set( 'articles', 'art-1', $embedding, ['title' => 'First Article'] );
+$store->set( 'articles', 'art-2', $embedding2, ['title' => 'Second Article'] );
 $store->flush();
+
+// Search — brute-force (best for <5K vectors)
+$results = $store->search( 'articles', $queryVector, 5 );
+
+// Matryoshka search — 3-5x faster (best for <10K vectors)
+$results = $store->matryoshkaSearch( 'articles', $queryVector, 5 );
+// Default stages: 128d → 384d → 768d
+
+// IVF + Matryoshka — 10-15x faster (best for 5K-100K vectors)
+$ivf = new IVFIndex( $store, numClusters: 100, numProbes: 20 );
+$ivf->build( 'articles' );  // K-means clustering (one-time)
+$results = $ivf->matryoshkaSearch( 'articles', $queryVector, 5 );
 ```
 
-## API
+## Search Strategies
 
-### Constructor
+### 1. Brute-force (default)
+
+Compares query against every vector. Simple, exact, O(N).
 
 ```php
-new VectorStore(
-    string $directory,       // Storage directory (created if needed)
-    int    $dimensions = 768, // Vector dimensions
-    int    $maxCollections = 50 // Max collections in memory (LRU)
-);
+$store->search( $collection, $query, $limit );
 ```
 
-### Write
+Best for: <5K vectors.
+
+### 2. Matryoshka Multi-Stage
+
+Exploits Matryoshka embeddings (EmbeddingGemma, etc.) where the first N dimensions capture the most important features.
 
 ```php
-$store->set( $collection, $id, $vector, $metadata = [] );  // Insert/update
-$store->remove( $collection, $id );                         // Delete
-$store->drop( $collection );                                // Delete collection
-$store->flush();                                            // Persist to disk
+$store->matryoshkaSearch( $collection, $query, $limit, [128, 384, 768] );
 ```
 
-### Read
+Three passes:
+1. **128d** — scan all vectors (cheap, 6x less computation)
+2. **384d** — re-rank top candidates
+3. **768d** — final re-rank
+
+Result: 3-5x speedup, ~100% recall. Best for: <10K vectors.
+
+### 3. IVF (Inverted File Index)
+
+Partitions vectors into K clusters via k-means. At query time, only searches the P closest clusters.
 
 ```php
-$store->get( $collection, $id );        // Single vector + metadata
-$store->has( $collection, $id );        // Exists check
-$store->count( $collection );           // Vector count
-$store->ids( $collection );             // All IDs
-$store->collections();                  // All collection names
-$store->stats();                        // Storage statistics
+$ivf = new IVFIndex( $store, numClusters: 100, numProbes: 20 );
+$ivf->build( 'articles' );
+$ivf->search( $collection, $query, $limit );
 ```
 
-### Search
+Scans only N×(P/K) vectors instead of N. Best for: 5K-100K vectors.
+
+### 4. IVF + Matryoshka (fastest)
+
+Combines IVF cluster pruning with Matryoshka multi-stage refinement.
 
 ```php
-// Full-resolution search (768d)
-$store->search( $collection, $queryVector, $limit = 5 );
-
-// Matryoshka search (coarse 128d → fine 768d)
-$store->matryoshkaSearch( $collection, $queryVector, $limit = 5, $coarseDims = 128 );
-
-// Reduced-dimension search (faster, slightly less accurate)
-$store->search( $collection, $queryVector, $limit, $dimSlice = 128 );
-
-// Multi-collection search
-$store->searchAcross( ['articles', 'comments'], $queryVector, $limit );
+$ivf->matryoshkaSearch( $collection, $query, $limit, [128, 384, 768] );
 ```
 
-### Import / Export
+IVF narrows to ~20% of vectors, then Matryoshka stages refine further. **10-15x speedup** over brute-force. Best for: 5K-100K vectors.
+
+## Performance
+
+| Vectors | Brute-force 768d | Matryoshka 3-stage | IVF | IVF + Matryoshka |
+|---------|-----------------|-------------------|-----|-----------------|
+| 1,000 | 134ms | 29ms (4.7x) | 28ms (4.8x) | **17ms (7.9x)** |
+| 5,000 | 796ms | 182ms (4.4x) | 100ms (7.9x) | **54ms (14.7x)** |
+
+Storage: 3,072 bytes per 768d vector (3 MB per 1,000 vectors).
+
+## API Reference
+
+### VectorStore
 
 ```php
-// Import from JSON array
-$store->import( 'articles', [
-    ['id' => 'a1', 'vector' => [...], 'metadata' => ['title' => '...']],
-]);
+new VectorStore( string $directory, int $dimensions = 768, int $maxCollections = 50 );
 
-// Export to JSON-serializable array
-$data = $store->export( 'articles' );
+// Write
+$store->set( $collection, $id, $vector, $metadata = [] );
+$store->remove( $collection, $id );
+$store->drop( $collection );
+$store->flush();
+
+// Read
+$store->get( $collection, $id );       // → {id, vector, metadata} | null
+$store->has( $collection, $id );       // → bool
+$store->count( $collection );          // → int
+$store->ids( $collection );            // → string[]
+$store->collections();                 // → string[]
+$store->stats();                       // → {dimensions, total_vectors, ...}
+
+// Search
+$store->search( $collection, $query, $limit, $dimSlice = 0 );
+$store->matryoshkaSearch( $collection, $query, $limit, $stages = [128, 384, 768] );
+$store->searchAcross( $collections, $query, $limit, $dimSlice = 0 );
+
+// Import / Export
+$store->import( $collection, $records );
+$store->export( $collection );
 ```
 
-### Math utilities (static)
+### IVFIndex
 
 ```php
-VectorStore::normalize( $vector );              // L2 normalize
-VectorStore::cosineSim( $a, $b, $dims );        // Cosine similarity
-VectorStore::euclideanDist( $a, $b, $dims );    // Euclidean distance
-VectorStore::dotProduct( $a, $b, $dims );       // Dot product
+new IVFIndex( VectorStore $store, int $numClusters = 100, int $numProbes = 10 );
+
+$ivf->build( $collection, $sampleDims = 128 );   // Build k-means index
+$ivf->search( $collection, $query, $limit );      // IVF search
+$ivf->matryoshkaSearch( $collection, $query, $limit, $stages ); // IVF + Matryoshka
+$ivf->hasIndex( $collection );                     // Check if index exists
+$ivf->indexStats( $collection );                   // Index statistics
+$ivf->dropIndex( $collection );                    // Remove index
+```
+
+### Math Utilities (static)
+
+```php
+VectorStore::normalize( $vector );             // L2 normalize
+VectorStore::cosineSim( $a, $b, $dims );       // Cosine similarity
+VectorStore::euclideanDist( $a, $b, $dims );   // Euclidean distance
+VectorStore::dotProduct( $a, $b, $dims );      // Dot product
 ```
 
 ## Storage Format
 
 ```
 vectors/
-├── articles.bin   ← Raw Float32 (N × 768 × 4 bytes)
-├── articles.json  ← Manifest: IDs, metadata, version
+├── articles.bin       ← Raw Float32 (N × 768 × 4 bytes)
+├── articles.json      ← Manifest: IDs, metadata, version
+├── articles.ivf.json  ← IVF index: centroids, cluster assignments
 ├── comments.bin
 └── comments.json
 ```
 
-Each `.bin` file is a contiguous array of Float32 values. No headers, no padding, no alignment tricks. Just `N × dim × 4` bytes of raw floats.
-
-The `.json` manifest maps array positions to entity IDs and stores metadata:
-
-```json
-{
-  "version": 1,
-  "dim": 768,
-  "count": 1000,
-  "ids": ["article-1", "article-2", ...],
-  "meta": {
-    "article-1": {"title": "My Article"},
-    "article-2": {"title": "Another"}
-  }
-}
-```
-
-## How Matryoshka Search Works
-
-Matryoshka embeddings (like EmbeddingGemma) encode information hierarchically: the first 128 dimensions capture the most important features, 256 captures more, and 768 captures everything.
+## How IVF Works
 
 ```
-Full vector: [d0, d1, d2, ..., d127, d128, ..., d255, d256, ..., d767]
-              ├── 128d (coarse) ──┤
-              ├────── 256d (medium) ──────┤
-              ├────────── 768d (fine) ──────────────────────────────┤
+Build (one-time):
+  1. Run k-means on all vectors at 128d → K cluster centroids
+  2. Assign each vector to its nearest centroid
+  3. Save centroid positions + cluster memberships
+
+Search:
+  1. Find P closest centroids to query (P << K)
+  2. Only compare vectors in those P clusters
+  3. Reduction: scan N×(P/K) vectors instead of N
+
+Tuning:
+  K (clusters) = sqrt(N) is a good default
+  P (probes) = 10-20% of K balances speed vs recall
+  More probes = better recall, slower search
 ```
-
-Matryoshka search exploits this:
-
-1. **Coarse pass** (128d): Compare only first 128 dimensions. 6x less computation. Gets top N×3 candidates.
-2. **Fine re-rank** (768d): Re-score only the candidates using all 768 dimensions.
-
-Result: Nearly the same accuracy as full 768d search, but ~3-5x faster.
-
-## Performance
-
-Benchmarked on PHP 8.2, single thread:
-
-| Vectors | Insert | Full Search (768d) | Matryoshka (128→768) | Storage |
-|---------|--------|-------------------|---------------------|---------|
-| 100 | 15ms | 0.3ms | 0.2ms | 300 KB |
-| 1,000 | 120ms | 3ms | 1.5ms | 3 MB |
-| 5,000 | 600ms | 15ms | 6ms | 15 MB |
-| 10,000 | 1.2s | 30ms | 12ms | 30 MB |
-| 50,000 | 6s | 150ms | 60ms | 150 MB |
-
-For comparison, sqlite-vec with HNSW index on 50K vectors: ~5ms/query. But requires C extension installation.
 
 ## License
 
