@@ -69,14 +69,23 @@ foreach ( $sizes as $n ) {
 	$search_ms = round( ( microtime( true ) - $t ) / $iters * 1000, 2 );
 	echo "  Search 768d: {$search_ms}ms/query\n";
 
-	// Matryoshka search (128d → 768d)
+	// Matryoshka 2-stage (128→768)
 	$t = microtime( true );
 	for ( $i = 0; $i < $iters; $i++ ) {
-		$store->matryoshkaSearch( "bench_$n", $query, 5, 128, 3 );
+		$store->matryoshkaSearch( "bench_$n", $query, 5, [128, 768], 3 );
 	}
-	$mat_ms = round( ( microtime( true ) - $t ) / $iters * 1000, 2 );
-	$speedup = $search_ms > 0 ? round( $search_ms / $mat_ms, 1 ) : 0;
-	echo "  Matryoshka 128→768: {$mat_ms}ms/query ({$speedup}x faster)\n";
+	$mat2_ms = round( ( microtime( true ) - $t ) / $iters * 1000, 2 );
+	$speedup2 = $search_ms > 0 ? round( $search_ms / $mat2_ms, 1 ) : 0;
+	echo "  Matryoshka 2-stage (128→768): {$mat2_ms}ms ({$speedup2}x faster)\n";
+
+	// Matryoshka 3-stage (128→384→768)
+	$t = microtime( true );
+	for ( $i = 0; $i < $iters; $i++ ) {
+		$store->matryoshkaSearch( "bench_$n", $query, 5, [128, 384, 768], 3 );
+	}
+	$mat3_ms = round( ( microtime( true ) - $t ) / $iters * 1000, 2 );
+	$speedup3 = $search_ms > 0 ? round( $search_ms / $mat3_ms, 1 ) : 0;
+	echo "  Matryoshka 3-stage (128→384→768): {$mat3_ms}ms ({$speedup3}x faster)\n";
 
 	// Search (128d only)
 	$t = microtime( true );

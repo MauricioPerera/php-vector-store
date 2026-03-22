@@ -229,52 +229,84 @@ class VectorStore {
 	}
 
 	/**
-	 * Matryoshka search: coarse pass at low dims, fine re-rank at full dims.
+	 * Matryoshka search: multi-stage progressive refinement.
+	 *
+	 * Default 3 stages: 128d → 384d → 768d
+	 * Each stage narrows the candidate set before comparing at higher resolution.
 	 *
 	 * @param string  $collection          Collection to search.
 	 * @param float[] $query               Query vector.
 	 * @param int     $limit               Final results.
-	 * @param int     $coarseDims          Dimensions for coarse pass (default 128).
-	 * @param int     $candidateMultiplier Candidates = limit × multiplier (default 3).
-	 * @return array<array{id: string, score: float, coarse_score: float, metadata: array}>
+	 * @param int[]   $stages              Dimension stages (default [128, 384, 768]).
+	 * @param int     $candidateMultiplier Each stage keeps limit × multiplier candidates.
+	 * @return array<array{id: string, score: float, stages: array, metadata: array}>
 	 */
 	public function matryoshkaSearch(
 		string $collection,
 		array  $query,
 		int    $limit = 5,
-		int    $coarseDims = 128,
+		array  $stages = array( 128, 384, 768 ),
 		int    $candidateMultiplier = 3
 	): array {
-		// Phase 1: coarse
-		$candidates = $this->search( $collection, $query, $limit * $candidateMultiplier, $coarseDims );
+		$col = $this->loadCollection( $collection );
 
-		if ( empty( $candidates ) ) {
+		if ( empty( $col['ids'] ) ) {
 			return array();
 		}
 
-		// Phase 2: re-rank at full resolution
-		$col = $this->loadCollection( $collection );
-		$q   = self::normalize( $query );
-		$bpv = $this->bytesPerVector();
+		$q     = self::normalize( $query );
+		$bpv   = $this->bytesPerVector();
+		$count = count( $col['ids'] );
 
-		$reranked = array();
-		foreach ( $candidates as $c ) {
-			$pos = $col['id_map'][ $c['id'] ] ?? null;
-			if ( null === $pos ) continue;
+		// Ensure stages are sorted and capped at dim
+		sort( $stages );
+		$stages = array_map( fn( $s ) => min( $s, $this->dim ), $stages );
 
-			$v     = array_values( unpack( 'f' . $this->dim, $col['bin'], $pos * $bpv ) );
-			$score = self::cosineSim( $q, $v, $this->dim );
+		// Start with all indices as candidates
+		$candidate_indices = range( 0, $count - 1 );
+		$stage_scores      = array(); // id => [stage_dim => score]
 
-			$reranked[] = array(
-				'id'           => $c['id'],
-				'score'        => round( $score, 6 ),
-				'coarse_score' => $c['score'],
-				'metadata'     => $c['metadata'],
+		foreach ( $stages as $si => $dims ) {
+			$is_last = $si === count( $stages ) - 1;
+			$keep    = $is_last ? $limit : $limit * $candidateMultiplier;
+
+			$scored = array();
+
+			foreach ( $candidate_indices as $i ) {
+				$v     = array_values( unpack( 'f' . $dims, $col['bin'], $i * $bpv ) );
+				$score = self::cosineSim( $q, $v, $dims );
+
+				$scored[] = array( 'index' => $i, 'score' => $score );
+
+				$id = $col['ids'][ $i ];
+				if ( ! isset( $stage_scores[ $id ] ) ) {
+					$stage_scores[ $id ] = array();
+				}
+				$stage_scores[ $id ][ $dims ] = round( $score, 6 );
+			}
+
+			// Sort and keep top candidates for next stage
+			usort( $scored, fn( $a, $b ) => $b['score'] <=> $a['score'] );
+			$scored            = array_slice( $scored, 0, $keep );
+			$candidate_indices = array_map( fn( $s ) => $s['index'], $scored );
+		}
+
+		// Build final results from last stage's survivors
+		$last_dim = end( $stages );
+		$results  = array();
+
+		foreach ( $candidate_indices as $i ) {
+			$id = $col['ids'][ $i ];
+			$results[] = array(
+				'id'       => $id,
+				'score'    => $stage_scores[ $id ][ $last_dim ] ?? 0.0,
+				'stages'   => $stage_scores[ $id ] ?? array(),
+				'metadata' => $col['meta'][ $id ] ?? array(),
 			);
 		}
 
-		usort( $reranked, fn( $a, $b ) => $b['score'] <=> $a['score'] );
-		return array_slice( $reranked, 0, $limit );
+		usort( $results, fn( $a, $b ) => $b['score'] <=> $a['score'] );
+		return array_slice( $results, 0, $limit );
 	}
 
 	/**
