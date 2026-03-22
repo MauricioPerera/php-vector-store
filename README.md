@@ -297,6 +297,184 @@ All on Int8 quantized data (392 bytes/vector)
 
 Result: 500K vectors in 192 MB, searchable in ~15ms.
 
+## Integration Patterns
+
+### How IDs relate vectors to your data
+
+The vector store is **database-agnostic**. It only stores IDs (strings) and vectors (floats). Your primary database keeps the actual content. The ID is the link between them.
+
+```
+Your Database                         Vector Store
+┌──────────────────────────┐          ┌─────────────────────┐
+│ record with ID: "42"     │◄────────►│ id: "42"            │
+│ content, metadata, etc.  │          │ vector: [0.1, ...]  │
+└──────────────────────────┘          └─────────────────────┘
+```
+
+```php
+// Store: save content to your DB, save vector to store
+$id = save_to_your_database( $content );
+$store->set( 'articles', (string) $id, $embedding );
+
+// Search: get IDs from vector store, fetch content from your DB
+$results = $store->search( 'articles', $query_vector, 5 );
+foreach ( $results as $r ) {
+    $content = fetch_from_your_database( $r['id'] );
+}
+```
+
+Works with any data source:
+
+| Database | ID example | Works? |
+|----------|-----------|--------|
+| MySQL / MariaDB | `"42"` (auto-increment) | Yes |
+| PostgreSQL | `"7891"` (serial) | Yes |
+| MongoDB | `"64a7f3b..."` (_id) | Yes |
+| Redis | `"doc:abc123"` (key) | Yes |
+| SQLite | `"15"` (rowid) | Yes |
+| Files | `"note-xyz"` (filename) | Yes |
+| S3 / R2 | `"uploads/doc.pdf"` (key) | Yes |
+| REST API | `"ext-resource-99"` (external ID) | Yes |
+
+### Collections as entity types
+
+Use one collection per entity type. This improves search performance by reducing the number of vectors scanned per query.
+
+```php
+$store = new QuantizedStore( __DIR__ . '/vectors', 384 );
+
+// Each entity type is its own collection
+$store->set( 'posts', '42', $post_vector );
+$store->set( 'users', '7', $user_vector );
+$store->set( 'products', '128', $product_vector );
+$store->set( 'comments', '531', $comment_vector );
+```
+
+Storage on disk — each collection is independent:
+
+```
+vectors/
+├── posts.q8.bin          ← 50K post vectors
+├── posts.q8.json
+├── users.q8.bin          ← 10K user vectors
+├── users.q8.json
+├── products.q8.bin       ← 5K product vectors
+├── products.q8.json
+├── comments.q8.bin       ← 100K comment vectors
+└── comments.q8.json
+```
+
+**Why this is faster than one big collection:**
+
+| Strategy | Search "similar posts" | Vectors scanned |
+|----------|----------------------|-----------------|
+| Everything in `all` | 165K | 165K always |
+| Per-type: `posts` | 50K | Only posts |
+| Per-type: `users` | 10K | Only users |
+
+Search only what you need, cross-search when you need global recall:
+
+```php
+// Targeted: search only posts
+$store->search( 'posts', $query, 5 );
+
+// Targeted: search only users
+$store->search( 'users', $query, 5 );
+
+// Global: search across everything
+$store->searchAcross( ['posts', 'users', 'products', 'comments'], $query, 10 );
+```
+
+Each collection also gets its own IVF index, optimized for its size and semantic distribution.
+
+### WordPress integration
+
+```php
+$store = new QuantizedStore( WP_CONTENT_DIR . '/vectors', 384 );
+
+// On post publish: generate embedding and store
+add_action( 'wp_after_insert_post', function( $id, $post ) use ( $store ) {
+    if ( 'publish' !== $post->post_status ) return;
+    $text   = $post->post_title . ' ' . wp_strip_all_tags( $post->post_content );
+    $vector = array_slice( your_embedding_api( $text ), 0, 384 );
+    $store->set( 'posts', (string) $id, $vector, ['title' => $post->post_title] );
+    $store->flush();
+}, 10, 2 );
+
+// On post delete: remove vector
+add_action( 'deleted_post', function( $id ) use ( $store ) {
+    $store->remove( 'posts', (string) $id );
+    $store->flush();
+});
+
+// Search
+$query  = array_slice( your_embedding_api( 'search terms' ), 0, 384 );
+$results = $store->matryoshkaSearch( 'posts', $query, 5, [128, 256, 384] );
+foreach ( $results as $r ) {
+    $post = get_post( (int) $r['id'] );
+    echo $post->post_title . ' — score: ' . $r['score'];
+}
+```
+
+Works the same with Custom Post Types:
+
+```php
+// One collection per CPT
+$store->set( 'agent_memory', $memory_id, $vector );
+$store->set( 'agent_skill', $skill_id, $vector );
+$store->set( 'agent_knowledge', $knowledge_id, $vector );
+
+// Search memories only
+$store->search( 'agent_memory', $query, 10 );
+
+// Cross-search for agent recall
+$store->searchAcross( ['agent_memory', 'agent_skill', 'agent_knowledge'], $query, 10 );
+```
+
+### Laravel integration
+
+```php
+// In a Service Provider
+$this->app->singleton( QuantizedStore::class, function () {
+    return new QuantizedStore( storage_path( 'vectors' ), 384 );
+});
+
+// In a Model Observer
+public function saved( Article $article ) {
+    $store  = app( QuantizedStore::class );
+    $vector = array_slice( $this->embed( $article->body ), 0, 384 );
+    $store->set( 'articles', (string) $article->id, $vector );
+    $store->flush();
+}
+
+// In a Controller
+public function search( Request $request ) {
+    $store   = app( QuantizedStore::class );
+    $query   = array_slice( $this->embed( $request->q ), 0, 384 );
+    $results = $store->matryoshkaSearch( 'articles', $query, 10, [128, 256, 384] );
+    $ids     = array_column( $results, 'id' );
+    return Article::whereIn( 'id', $ids )->get();
+}
+```
+
+### Generic PHP (no framework)
+
+```php
+require_once 'vendor/autoload.php';
+// or: require_once 'src/QuantizedStore.php';
+
+use PHPVectorStore\QuantizedStore;
+
+$store = new QuantizedStore( __DIR__ . '/data/vectors', 384 );
+
+// Store
+$store->set( 'documents', 'doc-001', $embedding, ['title' => 'My Doc'] );
+$store->flush();
+
+// Search
+$results = $store->matryoshkaSearch( 'documents', $query, 5, [128, 256, 384] );
+```
+
 ## vs sqlite-vec
 
 | | PHP Vector Store | sqlite-vec |
