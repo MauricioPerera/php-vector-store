@@ -457,6 +457,66 @@ public function search( Request $request ) {
 }
 ```
 
+### Neuron AI integration (RAG)
+
+PHP Vector Store includes a built-in adapter for [Neuron AI](https://github.com/neuron-core/neuron-ai), the PHP agentic framework. It implements `VectorStoreInterface` as a zero-dependency local alternative to Pinecone, Qdrant, Chroma, etc.
+
+```php
+use NeuronAI\RAG\RAG;
+use NeuronAI\Providers\AIProviderInterface;
+use NeuronAI\RAG\VectorStore\VectorStoreInterface;
+use NeuronAI\RAG\Embeddings\EmbeddingsProviderInterface;
+use PHPVectorStore\Integration\NeuronVectorStore;
+
+class MyRAG extends RAG
+{
+    protected function provider(): AIProviderInterface
+    {
+        // Your AI provider (Anthropic, OpenAI, Ollama, etc.)
+    }
+
+    protected function embeddings(): EmbeddingsProviderInterface
+    {
+        // Your embeddings provider
+    }
+
+    protected function vectorStore(): VectorStoreInterface
+    {
+        return new NeuronVectorStore(
+            directory:  __DIR__ . '/vectors',
+            dimensions: 384,
+            collection: 'knowledge',
+            topK:       5,
+            quantized:  true,   // Int8 — 4x smaller
+            matryoshka: true,   // Multi-stage search
+        );
+    }
+}
+
+// Use it
+$rag = MyRAG::make();
+$rag->addDocuments( $loader->getDocuments() );  // Embeds + stores
+$response = $rag->chat( new UserMessage( 'What is...' ) );
+```
+
+The adapter:
+- Stores documents with content, sourceType, sourceName, and metadata
+- Returns `Document` objects with similarity scores
+- Supports `deleteBy(sourceType, sourceName)` for reindexing
+- Auto-selects Matryoshka stages based on dimensions
+- Uses Int8 quantization by default (392 bytes/vector at 384d)
+
+**vs other Neuron vector stores:**
+
+| Store | Dependencies | Local | Storage/vec (384d) |
+|-------|-------------|-------|--------------------|
+| **NeuronVectorStore** | **None** | **Yes** | **392 B** |
+| MemoryVectorStore | None | Yes | ~3 KB (in-memory only, lost on restart) |
+| FileVectorStore | None | Yes | ~7 KB (JSON) |
+| PineconeVectorStore | API key + HTTP | No | Cloud-hosted |
+| QdrantVectorStore | Qdrant server | No | Server-hosted |
+| ChromaVectorStore | Chroma server | No | Server-hosted |
+
 ### Generic PHP (no framework)
 
 ```php
