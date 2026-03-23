@@ -6,6 +6,7 @@ use PHPUnit\Framework\TestCase;
 use PHPVectorStore\QuantizedStore;
 use PHPVectorStore\StoreInterface;
 use PHPVectorStore\Distance;
+use PHPVectorStore\Exception\DimensionMismatchException;
 
 class QuantizedStoreTest extends TestCase
 {
@@ -81,6 +82,12 @@ class QuantizedStoreTest extends TestCase
 		];
 		$this->assertEquals( 2, $store->import( 'test', $records ) );
 		$this->assertCount( 2, $store->export( 'test' ) );
+	}
+
+	public function testDimensionMismatchThrows(): void {
+		$store = new QuantizedStore( $this->dir, 4 );
+		$this->expectException( DimensionMismatchException::class );
+		$store->set( 'test', 'doc1', [1.0, 0.0] ); // 2 dims, expects 4
 	}
 
 	public function testFlushAndReload(): void {

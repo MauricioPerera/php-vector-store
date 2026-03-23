@@ -6,6 +6,7 @@ use PHPUnit\Framework\TestCase;
 use PHPVectorStore\VectorStore;
 use PHPVectorStore\StoreInterface;
 use PHPVectorStore\Distance;
+use PHPVectorStore\Exception\DimensionMismatchException;
 
 class VectorStoreTest extends TestCase
 {
@@ -139,6 +140,12 @@ class VectorStoreTest extends TestCase
 		$b = [1.0, 0.0, 0.0];
 		$this->assertEqualsWithDelta( 1.0, VectorStore::computeScore( $a, $b, 3, Distance::Cosine ), 0.01 );
 		$this->assertEqualsWithDelta( 1.0, VectorStore::computeScore( $a, $b, 3, Distance::Euclidean ), 0.01 );
+	}
+
+	public function testDimensionMismatchThrows(): void {
+		$store = new VectorStore( $this->dir, 4 );
+		$this->expectException( DimensionMismatchException::class );
+		$store->set( 'test', 'doc1', [1.0, 0.0] ); // 2 dims, expects 4
 	}
 
 	public function testEmptySearch(): void {

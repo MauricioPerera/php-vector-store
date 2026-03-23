@@ -230,6 +230,26 @@ use PHPVectorStore\Exception\DimensionMismatchException;
 use PHPVectorStore\Exception\CollectionNotFoundException;
 ```
 
+## Concurrency & Scaling Notes
+
+### File Locking
+
+All `flush()` operations use `flock(LOCK_EX)` to prevent race conditions when multiple PHP processes write to the same collection simultaneously. This ensures atomic writes even under concurrent web requests.
+
+### Dimension Validation
+
+`set()` throws `DimensionMismatchException` if the vector has fewer dimensions than the store was configured with. This catches mismatches early (e.g., passing a 384d vector to a 768d store).
+
+### JSON Manifest Scaling
+
+Each collection stores its ID list and metadata in a `.json` sidecar file. For collections approaching 100K vectors, this manifest can grow large (~10-20 MB). Considerations:
+
+- **Memory**: The entire manifest is loaded into memory on first access to a collection. For 100K vectors with metadata, budget ~50-100 MB of PHP memory.
+- **Latency**: JSON decode of a large manifest adds ~50-200ms on first load (cached for subsequent operations within the same request).
+- **Mitigation**: Use multiple collections (per entity type) to keep individual manifests small. A collection of 10K vectors has a ~1-2 MB manifest.
+
+For datasets beyond 100K vectors, consider sqlite-vec or an external vector database.
+
 ## API Reference
 
 ### StoreInterface (VectorStore & QuantizedStore)

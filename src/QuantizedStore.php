@@ -68,6 +68,10 @@ class QuantizedStore implements StoreInterface {
 	 * @param array   $metadata   Optional metadata.
 	 */
 	public function set( string $collection, string $id, array $vector, array $metadata = array() ): void {
+		if ( count( $vector ) < $this->dim ) {
+			throw Exception\DimensionMismatchException::forVectors( $this->dim, count( $vector ) );
+		}
+
 		$col = $this->loadCollection( $collection );
 
 		$normalized = VectorStore::normalize( $vector );
@@ -500,13 +504,22 @@ class QuantizedStore implements StoreInterface {
 			'meta'    => $col['meta'],
 		);
 
-		$tmp_json = $this->dir . '/' . $name . '.q8.json.tmp';
-		$tmp_bin  = $this->dir . '/' . $name . '.q8.bin.tmp';
+		$json_path = $this->dir . '/' . $name . '.q8.json';
+		$bin_path  = $this->dir . '/' . $name . '.q8.bin';
+		$lock_path = $this->dir . '/' . $name . '.q8.lock';
+		$tmp_json  = $json_path . '.tmp';
+		$tmp_bin   = $bin_path . '.tmp';
 
-		file_put_contents( $tmp_json, json_encode( $manifest, JSON_UNESCAPED_SLASHES ) );
-		file_put_contents( $tmp_bin, $col['bin'] );
+		$lock = fopen( $lock_path, 'c' );
+		if ( $lock && flock( $lock, LOCK_EX ) ) {
+			file_put_contents( $tmp_json, json_encode( $manifest, JSON_UNESCAPED_SLASHES ) );
+			file_put_contents( $tmp_bin, $col['bin'] );
 
-		rename( $tmp_json, $this->dir . '/' . $name . '.q8.json' );
-		rename( $tmp_bin, $this->dir . '/' . $name . '.q8.bin' );
+			rename( $tmp_json, $json_path );
+			rename( $tmp_bin, $bin_path );
+
+			flock( $lock, LOCK_UN );
+			fclose( $lock );
+		}
 	}
 }
