@@ -21,7 +21,7 @@
 
 namespace PHPVectorStore;
 
-class QuantizedStore {
+class QuantizedStore implements StoreInterface {
 
 	private const FORMAT_VERSION = 1;
 	private const HEADER_BYTES   = 8; // min_f32 + max_f32
@@ -157,27 +157,40 @@ class QuantizedStore {
 	/**
 	 * Search using quantized int8 dot product (fast integer arithmetic).
 	 */
-	public function search( string $collection, array $query, int $limit = 5, int $dimSlice = 0 ): array {
+	public function search( string $collection, array $query, int $limit = 5, int $dimSlice = 0, ?Distance $distance = null ): array {
 		$col = $this->loadCollection( $collection );
 		if ( empty( $col['ids'] ) ) return array();
 
+		$distance    = $distance ?? Distance::Cosine;
 		$dims        = $dimSlice > 0 ? min( $dimSlice, $this->dim ) : $this->dim;
 		$q_norm      = VectorStore::normalize( $query );
-		$q_quantized = self::quantize( $q_norm, $this->dim );
+		$count       = count( $col['ids'] );
+		$bpv         = $this->bytesPerVector();
+		$results     = array();
 
-		$count   = count( $col['ids'] );
-		$bpv     = $this->bytesPerVector();
-		$results = array();
-
-		for ( $i = 0; $i < $count; $i++ ) {
-			$score = self::int8CosineSim( $q_quantized, 0, $col['bin'], $i * $bpv, $this->dim, $dims );
-
-			if ( $score > 0 ) {
-				$results[] = array(
-					'id'       => $col['ids'][ $i ],
-					'score'    => round( $score, 6 ),
-					'metadata' => $col['meta'][ $col['ids'][ $i ] ] ?? array(),
-				);
+		if ( $distance === Distance::Cosine ) {
+			$q_quantized = self::quantize( $q_norm, $this->dim );
+			for ( $i = 0; $i < $count; $i++ ) {
+				$score = self::int8CosineSim( $q_quantized, 0, $col['bin'], $i * $bpv, $this->dim, $dims );
+				if ( $score > 0 ) {
+					$results[] = array(
+						'id'       => $col['ids'][ $i ],
+						'score'    => round( $score, 6 ),
+						'metadata' => $col['meta'][ $col['ids'][ $i ] ] ?? array(),
+					);
+				}
+			}
+		} else {
+			for ( $i = 0; $i < $count; $i++ ) {
+				$v     = self::dequantize( $col['bin'], $i * $bpv, $this->dim );
+				$score = VectorStore::computeScore( $q_norm, $v, $dims, $distance );
+				if ( $score > 0 ) {
+					$results[] = array(
+						'id'       => $col['ids'][ $i ],
+						'score'    => round( $score, 6 ),
+						'metadata' => $col['meta'][ $col['ids'][ $i ] ] ?? array(),
+					);
+				}
 			}
 		}
 
@@ -193,13 +206,15 @@ class QuantizedStore {
 		array  $query,
 		int    $limit = 5,
 		array  $stages = array( 128, 384, 768 ),
-		int    $candidateMultiplier = 3
+		int    $candidateMultiplier = 3,
+		?Distance $distance = null
 	): array {
 		$col = $this->loadCollection( $collection );
 		if ( empty( $col['ids'] ) ) return array();
 
+		$distance    = $distance ?? Distance::Cosine;
 		$q_norm      = VectorStore::normalize( $query );
-		$q_quantized = self::quantize( $q_norm, $this->dim );
+		$q_quantized = ( $distance === Distance::Cosine ) ? self::quantize( $q_norm, $this->dim ) : null;
 
 		$bpv   = $this->bytesPerVector();
 		$count = count( $col['ids'] );
@@ -217,7 +232,12 @@ class QuantizedStore {
 			$scored  = array();
 
 			foreach ( $candidate_indices as $i ) {
-				$score = self::int8CosineSim( $q_quantized, 0, $col['bin'], $i * $bpv, $this->dim, $dims );
+				if ( $q_quantized !== null ) {
+					$score = self::int8CosineSim( $q_quantized, 0, $col['bin'], $i * $bpv, $this->dim, $dims );
+				} else {
+					$v     = self::dequantize( $col['bin'], $i * $bpv, $this->dim );
+					$score = VectorStore::computeScore( $q_norm, $v, $dims, $distance );
+				}
 
 				$scored[] = array( 'index' => $i, 'score' => $score );
 
@@ -287,6 +307,47 @@ class QuantizedStore {
 			'compression'   => round( ( $this->dim * 4 ) / $this->bytesPerVector(), 1 ) . 'x',
 			'collections'   => $detail,
 		);
+	}
+
+	// ── Multi-collection Search ───────────────────────────────────────
+
+	public function searchAcross( array $collections, array $query, int $limit = 5, int $dimSlice = 0, ?Distance $distance = null ): array {
+		$merged = array();
+		foreach ( $collections as $col ) {
+			foreach ( $this->search( $col, $query, $limit, $dimSlice, $distance ) as $r ) {
+				$key = $col . ':' . $r['id'];
+				if ( ! isset( $merged[ $key ] ) || $r['score'] > $merged[ $key ]['score'] ) {
+					$r['collection'] = $col;
+					$merged[ $key ]  = $r;
+				}
+			}
+		}
+		$all = array_values( $merged );
+		usort( $all, fn( $a, $b ) => $b['score'] <=> $a['score'] );
+		return array_slice( $all, 0, $limit );
+	}
+
+	// ── Import / Export ────────────────────────────────────────────────
+
+	public function import( string $collection, array $records ): int {
+		$count = 0;
+		foreach ( $records as $r ) {
+			if ( empty( $r['id'] ) || empty( $r['vector'] ) ) continue;
+			$this->set( $collection, $r['id'], $r['vector'], $r['metadata'] ?? array() );
+			$count++;
+		}
+		return $count;
+	}
+
+	public function export( string $collection ): array {
+		$col    = $this->loadCollection( $collection );
+		$bpv    = $this->bytesPerVector();
+		$result = array();
+		foreach ( $col['ids'] as $i => $id ) {
+			$floats   = self::dequantize( $col['bin'], $i * $bpv, $this->dim );
+			$result[] = array( 'id' => $id, 'vector' => $floats, 'metadata' => $col['meta'][ $id ] ?? array() );
+		}
+		return $result;
 	}
 
 	// ── Quantization Math ──────────────────────────────────────────────

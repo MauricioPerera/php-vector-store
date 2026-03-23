@@ -25,7 +25,7 @@
 
 namespace PHPVectorStore;
 
-class VectorStore {
+class VectorStore implements StoreInterface {
 
 	private const FORMAT_VERSION = 1;
 	private const BYTES_PER_F32  = 4;
@@ -197,23 +197,24 @@ class VectorStore {
 	 * @param int     $dimSlice    Dimensions to compare (Matryoshka: 128, 256, or full).
 	 * @return array<array{id: string, score: float, metadata: array}>
 	 */
-	public function search( string $collection, array $query, int $limit = 5, int $dimSlice = 0 ): array {
+	public function search( string $collection, array $query, int $limit = 5, int $dimSlice = 0, ?Distance $distance = null ): array {
 		$col = $this->loadCollection( $collection );
 
 		if ( empty( $col['ids'] ) ) {
 			return array();
 		}
 
-		$dims  = $dimSlice > 0 ? min( $dimSlice, $this->dim ) : $this->dim;
-		$q     = self::normalize( $query );
-		$count = count( $col['ids'] );
-		$bpv   = $this->bytesPerVector();
+		$distance = $distance ?? Distance::Cosine;
+		$dims     = $dimSlice > 0 ? min( $dimSlice, $this->dim ) : $this->dim;
+		$q        = self::normalize( $query );
+		$count    = count( $col['ids'] );
+		$bpv      = $this->bytesPerVector();
 
 		$results = array();
 
 		for ( $i = 0; $i < $count; $i++ ) {
 			$v     = array_values( unpack( 'f' . $dims, $col['bin'], $i * $bpv ) );
-			$score = self::cosineSim( $q, $v, $dims );
+			$score = self::computeScore( $q, $v, $dims, $distance );
 
 			if ( $score > 0 ) {
 				$results[] = array(
@@ -246,7 +247,8 @@ class VectorStore {
 		array  $query,
 		int    $limit = 5,
 		array  $stages = array( 128, 384, 768 ),
-		int    $candidateMultiplier = 3
+		int    $candidateMultiplier = 3,
+		?Distance $distance = null
 	): array {
 		$col = $this->loadCollection( $collection );
 
@@ -254,9 +256,10 @@ class VectorStore {
 			return array();
 		}
 
-		$q     = self::normalize( $query );
-		$bpv   = $this->bytesPerVector();
-		$count = count( $col['ids'] );
+		$distance = $distance ?? Distance::Cosine;
+		$q        = self::normalize( $query );
+		$bpv      = $this->bytesPerVector();
+		$count    = count( $col['ids'] );
 
 		// Ensure stages are sorted and capped at dim
 		sort( $stages );
@@ -274,7 +277,7 @@ class VectorStore {
 
 			foreach ( $candidate_indices as $i ) {
 				$v     = array_values( unpack( 'f' . $dims, $col['bin'], $i * $bpv ) );
-				$score = self::cosineSim( $q, $v, $dims );
+				$score = self::computeScore( $q, $v, $dims, $distance );
 
 				$scored[] = array( 'index' => $i, 'score' => $score );
 
@@ -312,11 +315,11 @@ class VectorStore {
 	/**
 	 * Multi-collection search. Merges results, keeping max score per ID.
 	 */
-	public function searchAcross( array $collections, array $query, int $limit = 5, int $dimSlice = 0 ): array {
+	public function searchAcross( array $collections, array $query, int $limit = 5, int $dimSlice = 0, ?Distance $distance = null ): array {
 		$merged = array();
 
 		foreach ( $collections as $col ) {
-			foreach ( $this->search( $col, $query, $limit, $dimSlice ) as $r ) {
+			foreach ( $this->search( $col, $query, $limit, $dimSlice, $distance ) as $r ) {
 				$key = $col . ':' . $r['id'];
 				if ( ! isset( $merged[ $key ] ) || $r['score'] > $merged[ $key ]['score'] ) {
 					$r['collection'] = $col;
@@ -584,5 +587,29 @@ class VectorStore {
 			$dot += $a[ $i ] * $b[ $i ];
 		}
 		return $dot;
+	}
+
+	/**
+	 * Manhattan distance between two vectors.
+	 */
+	public static function manhattanDist( array $a, array $b, int $dims ): float {
+		$sum = 0.0;
+		for ( $i = 0; $i < $dims; $i++ ) {
+			$sum += abs( $a[ $i ] - $b[ $i ] );
+		}
+		return $sum;
+	}
+
+	/**
+	 * Compute a similarity score using the given distance metric.
+	 * Higher = more similar.
+	 */
+	public static function computeScore( array $a, array $b, int $dims, Distance $distance ): float {
+		return match ( $distance ) {
+			Distance::Cosine     => self::cosineSim( $a, $b, $dims ),
+			Distance::DotProduct => self::dotProduct( $a, $b, $dims ),
+			Distance::Euclidean  => 1.0 / ( 1.0 + self::euclideanDist( $a, $b, $dims ) ),
+			Distance::Manhattan  => 1.0 / ( 1.0 + self::manhattanDist( $a, $b, $dims ) ),
+		};
 	}
 }

@@ -19,12 +19,13 @@ namespace PHPVectorStore\Integration;
 
 use NeuronAI\RAG\VectorStore\VectorStoreInterface;
 use NeuronAI\RAG\Document;
+use PHPVectorStore\StoreInterface;
 use PHPVectorStore\VectorStore;
 use PHPVectorStore\QuantizedStore;
 
 class NeuronVectorStore implements VectorStoreInterface
 {
-	private VectorStore|QuantizedStore $store;
+	private StoreInterface $store;
 	private string $collection;
 	private int $topK;
 	private bool $matryoshka;
@@ -152,7 +153,7 @@ class NeuronVectorStore implements VectorStoreInterface
 	/**
 	 * Get the underlying store instance.
 	 */
-	public function getStore(): VectorStore|QuantizedStore {
+	public function getStore(): StoreInterface {
 		return $this->store;
 	}
 

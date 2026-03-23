@@ -29,7 +29,7 @@ class IVFIndex {
 	private const FORMAT_VERSION = 1;
 	private const MAX_KMEANS_ITERS = 20;
 
-	private VectorStore $store;
+	private StoreInterface $store;
 	private int $numClusters;
 	private int $numProbes;
 
@@ -37,11 +37,11 @@ class IVFIndex {
 	private array $indices = array();
 
 	/**
-	 * @param VectorStore $store       The underlying vector store.
-	 * @param int         $numClusters Number of partitions (K). Rule of thumb: sqrt(N).
-	 * @param int         $numProbes   Clusters to search at query time (P). More = more accurate, slower.
+	 * @param StoreInterface $store       The underlying vector store.
+	 * @param int            $numClusters Number of partitions (K). Rule of thumb: sqrt(N).
+	 * @param int            $numProbes   Clusters to search at query time (P). More = more accurate, slower.
 	 */
-	public function __construct( VectorStore $store, int $numClusters = 100, int $numProbes = 10 ) {
+	public function __construct( StoreInterface $store, int $numClusters = 100, int $numProbes = 10 ) {
 		$this->store       = $store;
 		$this->numClusters = $numClusters;
 		$this->numProbes   = $numProbes;
