@@ -2,8 +2,20 @@
     "name": "mauricioperera/php-vector-store",
     "description": "Zero-dependency PHP vector database with BM25, hybrid search, Matryoshka, IVF indexing, and Int8 quantization",
     "type": "library",
-    "license": "GPL-2.0-or-later",
+    "license": "MIT",
     "keywords": ["vector", "embedding", "search", "bm25", "hybrid", "matryoshka", "ivf", "cosine-similarity", "ai", "rag", "neuron"],
+    "authors": [
+        {
+            "name": "Mauricio Perera",
+            "homepage": "https://github.com/MauricioPerera",
+            "role": "Developer"
+        }
+    ],
+    "homepage": "https://github.com/MauricioPerera/php-vector-store",
+    "support": {
+        "issues": "https://github.com/MauricioPerera/php-vector-store/issues",
+        "source": "https://github.com/MauricioPerera/php-vector-store"
+    },
     "require": {
         "php": ">=8.1"
     },
@@ -11,7 +23,7 @@
         "phpunit/phpunit": "^10.0"
     },
     "suggest": {
-        "neuron-ai/neuron-ai": "For RAG integration via NeuronVectorStore adapter"
+        "neuron-core/neuron-ai": "For RAG integration via NeuronVectorStore adapter"
     },
     "autoload": {
         "psr-4": {
@@ -26,5 +38,6 @@
     "scripts": {
         "test": "phpunit"
     },
-    "minimum-stability": "stable"
+    "minimum-stability": "stable",
+    "prefer-stable": true
 }
