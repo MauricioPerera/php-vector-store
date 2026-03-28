@@ -1,6 +1,6 @@
 # PHP Vector Store
 
-Zero-dependency PHP vector database with **BM25 full-text search**, **hybrid search** (vector + text), Matryoshka progressive search, IVF indexing, and Int8 quantization. Pure PHP 8.1+ — no SQLite, no C extensions, no FFI.
+Zero-dependency PHP vector database with **BM25 full-text search**, **hybrid search** (vector + text), Matryoshka progressive search, IVF indexing, Int8 quantization, and **1-bit binary quantization** (32x compression). Pure PHP 8.1+ — no SQLite, no C extensions, no FFI.
 
 ```
 composer require mauricioperera/php-vector-store
@@ -10,7 +10,9 @@ composer require mauricioperera/php-vector-store
 
 Most vector databases require C extensions (sqlite-vec), external services (Pinecone, Weaviate), or specific runtimes (Python). PHP Vector Store runs anywhere PHP runs — shared hosting, WordPress, Laravel, any framework.
 
-**New in v0.2:** BM25 full-text search, hybrid search fusion (RRF + Weighted), multiple distance metrics, `StoreInterface` for polymorphism, typed models, and a PHPUnit test suite.
+**New in v1.1:** `BinaryQuantizedStore` — 1-bit sign quantization, 96 bytes/vector (768d), 27.8x faster than Int8, Hamming distance search via XOR + popcount.
+
+**v0.2:** BM25 full-text search, hybrid search fusion (RRF + Weighted), multiple distance metrics, `StoreInterface` for polymorphism, typed models, and a PHPUnit test suite.
 
 ## Scaling Guide
 
@@ -18,8 +20,8 @@ Most vector databases require C extensions (sqlite-vec), external services (Pine
 |---------|-------------------|-------------|-------------|-------|
 | <5K | Float32 768d + Matryoshka | 3,072 B | 300 MB | ~3ms |
 | 5K-20K | Float32 384d + Matryoshka | 1,536 B | 150 MB | ~1.4ms |
-| 20K-100K | Int8 384d + IVF + Matryoshka | **392 B** | **38 MB** | ~5ms |
-| 100K-500K | Int8 384d + IVF + Matryoshka | **392 B** | **192 MB** | ~15ms |
+| 20K-100K | Int8 384d + IVF + Matryoshka | 392 B | 38 MB | ~5ms |
+| 100K-500K | **Binary 768d + IVF + Matryoshka** | **96 B** | **9.4 MB** | ~6ms |
 | >500K | Use sqlite-vec or external service | — | — | — |
 
 ## Quick Start
@@ -56,17 +58,20 @@ $results = $store->search( 'articles', $query, 5, 0, Distance::Euclidean );
 
 ## Features
 
-### Vector Storage (Float32 & Int8)
+### Vector Storage (Float32, Int8 & Binary)
 
 ```php
 // Full precision: dim x 4 bytes per vector
 $store = new VectorStore( '/path', 768 );
 
-// Quantized: dim + 8 bytes per vector (4x smaller)
+// Int8 quantized: dim + 8 bytes per vector (4x smaller)
 $q8 = new QuantizedStore( '/path', 384 );
+
+// Binary quantized: ceil(dim/8) bytes per vector (32x smaller)
+$b1 = new BinaryQuantizedStore( '/path', 768 );  // 96 B/vec
 ```
 
-Both implement `StoreInterface` — use them interchangeably.
+All three implement `StoreInterface` — use them interchangeably.
 
 ### BM25 Full-Text Search
 
@@ -158,7 +163,7 @@ $store->search( 'col', $query, 5, 0, Distance::DotProduct );
 $store->search( 'col', $query, 5, 0, Distance::Manhattan );
 ```
 
-Works with `search()`, `matryoshkaSearch()`, and `searchAcross()` on both VectorStore and QuantizedStore.
+Works with `search()`, `matryoshkaSearch()`, and `searchAcross()` on all three stores.
 
 ### IVF Clustering
 
@@ -171,7 +176,7 @@ $results = $ivf->search( 'articles', $query, 5 );
 $results = $ivf->matryoshkaSearch( 'articles', $query, 5, [128, 256, 384] );
 ```
 
-Works with both VectorStore and QuantizedStore (via `StoreInterface`).
+Works with VectorStore, QuantizedStore, and BinaryQuantizedStore (via `StoreInterface`).
 
 ### Matryoshka Multi-Stage Search
 
@@ -181,11 +186,11 @@ Progressive refinement — each stage narrows candidates before the next.
 $store->matryoshkaSearch( 'col', $query, 5, [128, 384, 768] );
 ```
 
-Speedup: **3-5x** over brute-force. Combined with IVF: **10-15x**.
+Speedup: **3-5x** over brute-force (Int8), **13.7x** (Binary). Combined with IVF: **10-15x**.
 
 ### StoreInterface
 
-Both `VectorStore` and `QuantizedStore` implement `StoreInterface`:
+`VectorStore`, `QuantizedStore`, and `BinaryQuantizedStore` all implement `StoreInterface`:
 
 ```php
 use PHPVectorStore\StoreInterface;
@@ -195,9 +200,10 @@ function buildIndex( StoreInterface $store ): void {
     $ivf->build( 'articles' );
 }
 
-// Works with either store
+// Works with any store
 buildIndex( new VectorStore( '/path', 384 ) );
 buildIndex( new QuantizedStore( '/path', 384 ) );
+buildIndex( new BinaryQuantizedStore( '/path', 768 ) );
 ```
 
 ### Typed Models
@@ -252,7 +258,7 @@ For datasets beyond 100K vectors, consider sqlite-vec or an external vector data
 
 ## API Reference
 
-### StoreInterface (VectorStore & QuantizedStore)
+### StoreInterface (VectorStore, QuantizedStore & BinaryQuantizedStore)
 
 ```php
 // Write
@@ -336,7 +342,9 @@ vectors/
 ├── articles.bin          ← Float32: N x dim x 4 bytes
 ├── articles.json         ← Manifest: IDs + metadata
 ├── articles.q8.bin       ← Int8: N x (dim + 8) bytes
-├── articles.q8.json      ← Quantized manifest
+├── articles.q8.json      ← Int8 manifest
+├── articles.b1.bin       ← Binary: N x ceil(dim/8) bytes
+├── articles.b1.json      ← Binary manifest
 ├── articles.ivf.json     ← IVF: centroids + cluster assignments
 ├── articles.bm25.bin     ← BM25: inverted index (serialized PHP)
 └── .htaccess             ← Access protection
@@ -349,27 +357,27 @@ composer install
 vendor/bin/phpunit
 ```
 
-41 tests across 5 suites: VectorStore, QuantizedStore, IVFIndex, BM25, HybridSearch.
+57 tests across 6 suites: VectorStore, QuantizedStore, BinaryQuantizedStore, IVFIndex, BM25, HybridSearch.
 
 ## Performance
 
-### Speed (5,000 random vectors, PHP 8.2)
+### Speed (1,000 vectors, bge-base 768d, PHP 8.2)
 
-| Method | Time/query | Speedup |
-|--------|-----------|---------|
-| Brute-force 768d | 796ms | 1x |
-| Matryoshka 128->384->768 | 182ms | 4.4x |
-| IVF | 100ms | 7.9x |
-| IVF + Matryoshka | **54ms** | **14.7x** |
+| Method | Int8 | Binary | Speedup |
+|--------|------|--------|---------|
+| Brute-force 768d | 556ms | **20ms** | **27.8x** |
+| Matryoshka 128→384→768 | 86ms | **6.3ms** | **13.7x** |
 
 ### Storage
 
-| Format | Per vector | 10K | 100K |
-|--------|-----------|-----|------|
-| Float32 768d | 3,072 B | 30 MB | 300 MB |
-| Float32 384d | 1,536 B | 15 MB | 150 MB |
-| Int8 768d | 776 B | 7.6 MB | 76 MB |
-| **Int8 384d** | **392 B** | **3.8 MB** | **38 MB** |
+| Format | Per vector | 10K | 100K | 500K |
+|--------|-----------|-----|------|------|
+| Float32 768d | 3,072 B | 30 MB | 300 MB | 1.5 GB |
+| Float32 384d | 1,536 B | 15 MB | 150 MB | 750 MB |
+| Int8 768d | 776 B | 7.6 MB | 76 MB | 380 MB |
+| Int8 384d | 392 B | 3.8 MB | 38 MB | 192 MB |
+| **Binary 768d** | **96 B** | **0.9 MB** | **9.4 MB** | **47 MB** |
+| **Binary 384d** | **48 B** | **0.47 MB** | **4.7 MB** | **23 MB** |
 
 ## Integration Patterns
 
@@ -435,6 +443,7 @@ PHPVectorStore\
 ├── StoreInterface           ← Common interface
 ├── VectorStore              ← Float32 storage (implements StoreInterface)
 ├── QuantizedStore           ← Int8 storage (implements StoreInterface)
+├── BinaryQuantizedStore     ← 1-bit storage (implements StoreInterface)
 ├── IVFIndex                 ← K-means clustering (wraps StoreInterface)
 ├── HybridSearch             ← Vector + BM25 fusion
 ├── Distance                 ← Enum: Cosine, Euclidean, DotProduct, Manhattan
@@ -456,4 +465,4 @@ PHPVectorStore\
 
 ## License
 
-GPL-2.0-or-later
+MIT
